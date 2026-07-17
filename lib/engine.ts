@@ -1,438 +1,465 @@
-// Quebec Logistics Tycoon - Game Engine
-// All game logic: economy, trucks, routes, automation, staff
+// Canada City Builder - Game engine
 
-import type { GameState, Truck, Warehouse, Store, Contract, Staff, Point, Cargo } from './types';
-import { CITIES, STORES, generateStaffName } from './gamedata';
+import type { CityState, GameStats, Tile, BuildingType, TaxLevel } from './types';
+import { BUILDINGS, CATEGORY_ORDER, GRID_SIZE, SERVICE_BUILDINGS, START_MONEY, TAX_LEVELS, TICK_MS, ZONE_BUILDINGS } from './gamedata';
 
-// --- Helpers ---
-export function dist(a: Point, b: Point): number {
-  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+export function generateId(): string {
+  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function generateId(prefix: string): string {
-  return `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-}
-
-// --- Initial State ---
-export function createInitialState(playerName: string = 'Player'): GameState {
-  const toronto = CITIES.find(c => c.id === 'toronto')!;
-
-  const warehouse: Warehouse = {
-    id: 'wh-0',
-    cityId: toronto.id,
-    cityName: toronto.name,
-    pos: { ...toronto.pos },
-    level: 1,
-    capacity: 200,
-    stock: 50,
-    staff: [],
-    trucks: [],
-  };
-
-  const truck: Truck = {
-    id: generateId('truck'),
-    name: 'Camion 1',
-    pos: { ...toronto.pos },
-    route: [],
-    routeIndex: 0,
-    speed: 2.5,
-    cargo: null,
-    status: 'idle',
-    destinationStoreId: null,
-    destinationWarehouseId: null,
-    homeWarehouseId: 'wh-0',
-    capacity: 50,
-    condition: 100,
-    fuel: 100,
-    assignedByAI: false,
-    totalDeliveries: 0,
-    totalEarnings: 0,
-  };
-
-  warehouse.trucks.push(truck);
-
+function createEmptyTile(x: number, y: number): Tile {
   return {
-    money: 5000,
-    day: 1,
-    tick: 0,
-    warehouses: [warehouse],
-    trucks: [truck],
-    stores: STORES.map(s => ({ ...s })),
-    contracts: [],
-    cities: CITIES,
-    staff: [],
-    playerName,
-    totalEarned: 0,
-    totalSpent: 0,
-    totalDeliveries: 0,
-    reputation: 10,
-    lastSave: 0,
+    x,
+    y,
+    type: 'empty',
+    level: 1,
+    variant: Math.floor(Math.random() * 4),
+    roads: { top: false, right: false, bottom: false, left: false },
+    roadDistance: Infinity,
+    population: 0,
+    jobs: 0,
   };
 }
 
-// --- Route Generation ---
-// Simple path: warehouse -> store (straight line with slight curve)
-export function generateRoute(from: Point, to: Point): Point[] {
-  const waypoints: Point[] = [{ ...from }];
-  const steps = 8;
-  for (let i = 1; i < steps; i++) {
-    const t = i / steps;
-    const x = from.x + (to.x - from.x) * t;
-    const y = from.y + (to.y - from.y) * t;
-    // Add slight curve
-    const perpX = -(to.y - from.y) / dist(from, to);
-    const perpY = (to.x - from.x) / dist(from, to);
-    const curve = Math.sin(t * Math.PI) * 30;
-    waypoints.push({ x: x + perpX * curve, y: y + perpY * curve });
+export function createEmptyGrid(size: number): Tile[][] {
+  const grid: Tile[][] = [];
+  for (let y = 0; y < size; y++) {
+    const row: Tile[] = [];
+    for (let x = 0; x < size; x++) {
+      row.push(createEmptyTile(x, y));
+    }
+    grid.push(row);
   }
-  waypoints.push({ ...to });
-  return waypoints;
+  return grid;
 }
 
-// --- Dispatch Truck ---
-export function dispatchTruck(
-  state: GameState,
-  truckId: string,
-  storeId: string,
-  cargoQty: number,
-  cargoType: string = 'Marchandises générales'
-): boolean {
-  const truck = state.trucks.find(t => t.id === truckId);
-  if (!truck || truck.status !== 'idle') return false;
-
-  const store = state.stores.find(s => s.id === storeId);
-  if (!store) return false;
-
-  const warehouse = state.warehouses.find(w => w.id === truck.homeWarehouseId);
-  if (!warehouse || warehouse.stock < cargoQty) return false;
-
-  warehouse.stock -= cargoQty;
-  truck.cargo = {
-    id: generateId('cargo'),
-    type: cargoType,
-    quantity: cargoQty,
-    destinationStoreId: storeId,
-    sourceWarehouseId: warehouse.id,
+export function createInitialState(playerName: string = 'Joueur'): CityState {
+  const tiles = createEmptyGrid(GRID_SIZE);
+  const now = new Date().toISOString();
+  return {
+    playerId: 'player-cb-1',
+    playerName: playerName.trim() || 'Joueur',
+    gridSize: GRID_SIZE,
+    tiles,
+    stats: {
+      money: START_MONEY,
+      population: 0,
+      happiness: 75,
+      taxLevel: 'medium',
+      tick: 0,
+      totalEarned: 0,
+      totalSpent: 0,
+      roadsBuilt: 0,
+      buildingsBuilt: 0,
+    },
+    selectedCategory: 'road',
+    selectedBuilding: 'road',
+    toasts: [],
+    createdAt: now,
+    updatedAt: now,
   };
-  truck.destinationStoreId = storeId;
-  truck.status = 'en_route';
-  truck.route = generateRoute(truck.pos, store.pos);
-  truck.routeIndex = 0;
-  truck.fuel = Math.max(0, truck.fuel - 2);
-
-  return true;
 }
 
-// --- Tick (game loop) ---
-export function gameTick(state: GameState): GameState {
-  const newState = { ...state };
-  newState.tick++;
-  newState.trucks = state.trucks.map(t => ({ ...t }));
-  newState.warehouses = state.warehouses.map(w => ({ ...w, trucks: w.trucks.map(t => ({ ...t })) }));
+export function getBuilding(type: BuildingType) {
+  return BUILDINGS[type];
+}
 
-  // Every 60 ticks = 1 day
-  if (newState.tick % 60 === 0) {
-    newState.day++;
-    // Daily costs
-    let staffCost = 0;
-    for (const wh of newState.warehouses) {
-      for (const s of wh.staff) {
-        staffCost += s.salary;
-      }
-    }
-    newState.money -= staffCost;
-    newState.totalSpent += staffCost;
+export function getCategoryBuildings(category: import('./types').ToolbarCategory): BuildingType[] {
+  if (category === 'bulldoze') return ['empty'];
+  if (category === 'road') return ['road'];
+  return (Object.keys(BUILDINGS) as BuildingType[]).filter(t => BUILDINGS[t].category === category);
+}
 
-    // Truck maintenance
-    for (const truck of newState.trucks) {
-      truck.condition = Math.max(0, truck.condition - 0.5);
-      if (truck.condition < 30) {
-        // Repair cost
-        const repairCost = Math.floor((100 - truck.condition) * 5);
-        if (newState.money >= repairCost) {
-          newState.money -= repairCost;
-          newState.totalSpent += repairCost;
-          truck.condition = 100;
-        }
-      }
-      // Refuel
-      if (truck.fuel < 50) {
-        const fuelCost = Math.floor((100 - truck.fuel) * 0.5);
-        if (newState.money >= fuelCost) {
-          newState.money -= fuelCost;
-          newState.totalSpent += fuelCost;
-          truck.fuel = 100;
-        }
-      }
-    }
+function inBounds(state: CityState, x: number, y: number): boolean {
+  return x >= 0 && x < state.gridSize && y >= 0 && y < state.gridSize;
+}
 
-    // Increase store demand over time
-    for (const store of newState.stores) {
-      store.demand = Math.min(100, store.demand + 5 + Math.random() * 10);
-    }
+function cloneTile(tile: Tile): Tile {
+  return { ...tile, roads: { ...tile.roads } };
+}
 
-    // Warehouse restock (passive income from suppliers)
-    for (const wh of newState.warehouses) {
-      const restockRate = wh.level * 20 + (wh.staff.filter(s => s.role === 'loader').length * 10);
-      wh.stock = Math.min(wh.capacity, wh.stock + restockRate);
-    }
+function cloneGrid(tiles: Tile[][]): Tile[][] {
+  return tiles.map(row => row.map(cloneTile));
+}
+
+function cloneStats(stats: GameStats): GameStats {
+  return { ...stats };
+}
+
+export function canPlaceBuilding(state: CityState, x: number, y: number, type: BuildingType): { ok: boolean; reason?: string; cost?: number } {
+  if (!inBounds(state, x, y)) return { ok: false, reason: 'Hors de la carte' };
+  const tile = state.tiles[y][x];
+  if (type === 'empty') return { ok: true, cost: 0 };
+
+  // Bulldoze / build over existing
+  const def = BUILDINGS[type];
+  const cost = def.cost;
+  if (state.stats.money < cost) return { ok: false, reason: 'Fonds insuffisants', cost };
+
+  if (type === 'road') {
+    if (tile.type === 'road') return { ok: false, reason: 'Route déjà présente' };
+    return { ok: true, cost };
   }
 
-  // Move trucks
-  for (const truck of newState.trucks) {
-    if (truck.status === 'en_route' && truck.route.length > 0) {
-      if (truck.routeIndex < truck.route.length) {
-        const target = truck.route[truck.routeIndex];
-        const d = dist(truck.pos, target);
-        if (d < truck.speed) {
-          truck.pos = { ...target };
-          truck.routeIndex++;
-        } else {
-          const angle = Math.atan2(target.y - truck.pos.y, target.x - truck.pos.x);
-          truck.pos.x += Math.cos(angle) * truck.speed;
-          truck.pos.y += Math.sin(angle) * truck.speed;
-          truck.fuel = Math.max(0, truck.fuel - 0.02);
-        }
-      } else {
-        // Arrived at store
-        if (truck.cargo && truck.destinationStoreId) {
-          const store = newState.stores.find(s => s.id === truck.destinationStoreId);
-          if (store) {
-            const deliveryPayment = truck.cargo.quantity * 25 * (1 + store.contractLevel * 0.3);
-            newState.money += deliveryPayment;
-            newState.totalEarned += deliveryPayment;
-            newState.totalDeliveries++;
-            truck.totalDeliveries++;
-            truck.totalEarnings += deliveryPayment;
-            store.demand = Math.max(0, store.demand - truck.cargo.quantity * 2);
-            store.lastDelivery = newState.tick;
-            newState.reputation = Math.min(100, newState.reputation + 0.1);
-          }
-          truck.cargo = null;
-          truck.destinationStoreId = null;
-        }
-        // Return to home warehouse
-        const homeWh = newState.warehouses.find(w => w.id === truck.homeWarehouseId);
-        if (homeWh) {
-          const d = dist(truck.pos, homeWh.pos);
-          if (d < truck.speed) {
-            truck.pos = { ...homeWh.pos };
-            truck.status = 'idle';
-            truck.route = [];
-            truck.routeIndex = 0;
-          } else {
-            truck.status = 'returning';
-            truck.route = generateRoute(truck.pos, homeWh.pos);
-            truck.routeIndex = 0;
-            // Move toward home
-            const angle = Math.atan2(homeWh.pos.y - truck.pos.y, homeWh.pos.x - truck.pos.x);
-            truck.pos.x += Math.cos(angle) * truck.speed;
-            truck.pos.y += Math.sin(angle) * truck.speed;
-            truck.fuel = Math.max(0, truck.fuel - 0.02);
-          }
-        }
-      }
-    } else if (truck.status === 'returning') {
-      const homeWh = newState.warehouses.find(w => w.id === truck.homeWarehouseId);
-      if (homeWh) {
-        const d = dist(truck.pos, homeWh.pos);
-        if (d < truck.speed) {
-          truck.pos = { ...homeWh.pos };
-          truck.status = 'idle';
-          truck.route = [];
-          truck.routeIndex = 0;
-        } else {
-          const angle = Math.atan2(homeWh.pos.y - truck.pos.y, homeWh.pos.x - truck.pos.x);
-          truck.pos.x += Math.cos(angle) * truck.speed;
-          truck.pos.y += Math.sin(angle) * truck.speed;
-          truck.fuel = Math.max(0, truck.fuel - 0.02);
-        }
-      }
-    }
+  // Zones must be adjacent to a road
+  if (ZONE_BUILDINGS.includes(type)) {
+    const adjacentRoad = hasAdjacentRoad(state, x, y);
+    if (!adjacentRoad) return { ok: false, reason: 'Nécessite une route adjacente', cost };
+  }
 
-    // AI dispatch: if truck is idle and player has staff dispatchers
-    if (truck.status === 'idle' && !truck.assignedByAI) {
-      const homeWh = newState.warehouses.find(w => w.id === truck.homeWarehouseId);
-      if (homeWh) {
-        const hasDispatcher = homeWh.staff.some(s => s.role === 'dispatcher');
-        if (hasDispatcher && homeWh.stock >= 20) {
-          // Find a store with high demand and an active contract
-          const contract = newState.contracts.find(c => c.active && c.level > 0);
-          if (contract) {
-            const store = newState.stores.find(s => s.id === contract.storeId);
-            if (store && store.demand > 40 && homeWh.stock >= 20) {
-              const qty = Math.min(20, homeWh.stock, truck.capacity);
-              homeWh.stock -= qty;
-              truck.cargo = {
-                id: generateId('cargo'),
-                type: 'Auto-dispatch',
-                quantity: qty,
-                destinationStoreId: store.id,
-                sourceWarehouseId: homeWh.id,
-              };
-              truck.destinationStoreId = store.id;
-              truck.status = 'en_route';
-              truck.route = generateRoute(truck.pos, store.pos);
-              truck.routeIndex = 0;
-              truck.assignedByAI = true;
-            }
-          }
-        }
+  // Services also prefer roads but can be built without (with penalty)
+  if (SERVICE_BUILDINGS.includes(type) && !hasAdjacentRoad(state, x, y)) {
+    // still allowed
+  }
+
+  if (tile.type !== 'empty' && tile.type !== 'road') {
+    return { ok: false, reason: 'Terrain occupé', cost };
+  }
+
+  return { ok: true, cost };
+}
+
+function hasAdjacentRoad(state: CityState, x: number, y: number): boolean {
+  const dirs = [
+    [0, -1],
+    [1, 0],
+    [0, 1],
+    [-1, 0],
+  ];
+  for (const [dx, dy] of dirs) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (inBounds(state, nx, ny) && state.tiles[ny][nx].type === 'road') return true;
+  }
+  return false;
+}
+
+function updateRoadConnections(tiles: Tile[][]): void {
+  const size = tiles.length;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const tile = tiles[y][x];
+      if (tile.type !== 'road') continue;
+      tile.roads = {
+        top: y > 0 && tiles[y - 1][x].type === 'road',
+        right: x < size - 1 && tiles[y][x + 1].type === 'road',
+        bottom: y < size - 1 && tiles[y + 1][x].type === 'road',
+        left: x > 0 && tiles[y][x - 1].type === 'road',
+      };
+    }
+  }
+}
+
+function updateRoadDistances(state: CityState): void {
+  const size = state.gridSize;
+  // Reset
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      state.tiles[y][x].roadDistance = state.tiles[y][x].type === 'road' ? 0 : Infinity;
+    }
+  }
+  // BFS from all roads
+  const queue: [number, number, number][] = [];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (state.tiles[y][x].type === 'road') queue.push([x, y, 0]);
+    }
+  }
+  const dirs = [
+    [0, -1],
+    [1, 0],
+    [0, 1],
+    [-1, 0],
+  ];
+  let head = 0;
+  while (head < queue.length) {
+    const [x, y, d] = queue[head++];
+    for (const [dx, dy] of dirs) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+      if (state.tiles[ny][nx].roadDistance > d + 1) {
+        state.tiles[ny][nx].roadDistance = d + 1;
+        queue.push([nx, ny, d + 1]);
       }
     }
   }
-
-  return newState;
 }
 
-// --- Contracts ---
-export function negotiateContract(state: GameState, storeId: string, level: 1 | 2 | 3): boolean {
-  const store = state.stores.find(s => s.id === storeId);
-  if (!store) return false;
-
-  const costs = [0, 500, 2000, 8000];
-  const cost = costs[level];
-  if (state.money < cost) return false;
-
-  state.money -= cost;
-  state.totalSpent += cost;
-
-  // Remove existing contract for this store
-  const existing = state.contracts.find(c => c.storeId === storeId);
-  if (existing) {
-    existing.active = false;
+export function placeBuilding(state: CityState, x: number, y: number, type: BuildingType): { state: CityState; placed: boolean; message?: string; cost?: number } {
+  const check = canPlaceBuilding(state, x, y, type);
+  if (!check.ok) {
+    return { state, placed: false, message: check.reason, cost: check.cost };
   }
 
-  const contract: Contract = {
-    id: generateId('contract'),
-    storeId,
-    storeName: store.chainName + ' ' + store.cityName,
-    chainName: store.chainName,
-    level,
-    paymentPerDelivery: 25 * (1 + level * 0.3),
-    minDeliveriesPerWeek: level * 3,
-    active: true,
+  const nextState: CityState = {
+    ...state,
+    tiles: cloneGrid(state.tiles),
+    stats: cloneStats(state.stats),
+    toasts: [],
+    updatedAt: new Date().toISOString(),
   };
+  const tile = nextState.tiles[y][x];
+  const cost = type === 'empty' ? 0 : BUILDINGS[type].cost;
 
-  state.contracts.push(contract);
-  store.contractLevel = level;
-  return true;
+  // If replacing a building with road or empty, count as spent too? Demolition is free.
+  if (cost > 0) {
+    nextState.stats.money -= cost;
+    nextState.stats.totalSpent += cost;
+  }
+
+  if (type === 'empty') {
+    tile.type = 'empty';
+    tile.level = 1;
+    tile.roads = { top: false, right: false, bottom: false, left: false };
+  } else if (type === 'road') {
+    tile.type = 'road';
+    tile.level = 1;
+    nextState.stats.roadsBuilt += 1;
+  } else {
+    tile.type = type;
+    tile.level = 1;
+    nextState.stats.buildingsBuilt += 1;
+  }
+
+  updateRoadConnections(nextState.tiles);
+  updateRoadDistances(nextState);
+
+  const message = type === 'road' ? 'Route construite' : `${BUILDINGS[type].label} construit`;
+  return { state: nextState, placed: true, message, cost };
 }
 
-// --- Buy Truck ---
-export function buyTruck(state: GameState, warehouseId: string): boolean {
-  const cost = 8000;
-  if (state.money < cost) return false;
+export function upgradeBuilding(state: CityState, x: number, y: number): { state: CityState; upgraded: boolean; message?: string } {
+  if (!inBounds(state, x, y)) return { state, upgraded: false, message: 'Hors de la carte' };
+  const tile = state.tiles[y][x];
+  if (tile.type === 'empty' || tile.type === 'road') return { state, upgraded: false, message: 'Non améliorable' };
+  if (tile.level >= 3) return { state, upgraded: false, message: 'Niveau max atteint' };
 
-  const wh = state.warehouses.find(w => w.id === warehouseId);
-  if (!wh) return false;
+  const cost = BUILDINGS[tile.type].cost * 0.6 * tile.level;
+  if (state.stats.money < cost) return { state, upgraded: false, message: 'Fonds insuffisants' };
 
-  state.money -= cost;
-  state.totalSpent += cost;
-
-  const truck: Truck = {
-    id: generateId('truck'),
-    name: `Camion ${state.trucks.length + 1}`,
-    pos: { ...wh.pos },
-    route: [],
-    routeIndex: 0,
-    speed: 2.5,
-    cargo: null,
-    status: 'idle',
-    destinationStoreId: null,
-    destinationWarehouseId: null,
-    homeWarehouseId: warehouseId,
-    capacity: 50,
-    condition: 100,
-    fuel: 100,
-    assignedByAI: false,
-    totalDeliveries: 0,
-    totalEarnings: 0,
+  const nextState: CityState = {
+    ...state,
+    tiles: cloneGrid(state.tiles),
+    stats: cloneStats(state.stats),
+    toasts: [],
+    updatedAt: new Date().toISOString(),
   };
+  const nextTile = nextState.tiles[y][x];
+  nextTile.level += 1;
+  nextState.stats.money -= cost;
+  nextState.stats.totalSpent += cost;
 
-  state.trucks.push(truck);
-  wh.trucks.push(truck);
-  return true;
+  return { state: nextState, upgraded: true, message: `${BUILDINGS[nextTile.type].label} niveau ${nextTile.level}` };
 }
 
-// --- Upgrade Warehouse ---
-export function upgradeWarehouse(state: GameState, warehouseId: string): boolean {
-  const wh = state.warehouses.find(w => w.id === warehouseId);
-  if (!wh) return false;
-
-  const cost = wh.level * 5000;
-  if (state.money < cost) return false;
-  if (wh.level >= 5) return false;
-
-  state.money -= cost;
-  state.totalSpent += cost;
-  wh.level++;
-  wh.capacity = wh.level * 200;
-  return true;
-}
-
-// --- Hire Staff ---
-export function hireStaff(state: GameState, warehouseId: string, role: Staff['role']): boolean {
-  const wh = state.warehouses.find(w => w.id === warehouseId);
-  if (!wh) return false;
-
-  const salaries: Record<Staff['role'], number> = {
-    secretary: 200,
-    dispatcher: 300,
-    loader: 175,
-    manager: 400,
+export function setTaxLevel(state: CityState, level: TaxLevel): CityState {
+  if (state.stats.taxLevel === level) return state;
+  return {
+    ...state,
+    stats: { ...state.stats, taxLevel: level },
+    toasts: [],
+    updatedAt: new Date().toISOString(),
   };
+}
 
-  const hiringCosts: Record<Staff['role'], number> = {
-    secretary: 350,
-    dispatcher: 500,
-    loader: 300,
-    manager: 600,
+export function setSelectedCategory(state: CityState, category: import('./types').ToolbarCategory): CityState {
+  const buildings = getCategoryBuildings(category);
+  const selectedBuilding = buildings[0] ?? 'road';
+  return {
+    ...state,
+    selectedCategory: category,
+    selectedBuilding,
+    toasts: [],
   };
+}
 
-  const cost = hiringCosts[role];
-  if (state.money < cost) return false;
-
-  state.money -= cost;
-  state.totalSpent += cost;
-
-  const staff: Staff = {
-    id: generateId('staff'),
-    name: generateStaffName(),
-    role,
-    salary: salaries[role],
-    efficiency: 5 + Math.floor(Math.random() * 5),
-    hiredAt: state.tick,
+export function setSelectedBuilding(state: CityState, type: BuildingType): CityState {
+  return {
+    ...state,
+    selectedBuilding: type,
+    toasts: [],
   };
-
-  wh.staff.push(staff);
-  state.staff.push(staff);
-  return true;
 }
 
-// --- Fire Staff ---
-export function fireStaff(state: GameState, warehouseId: string, staffId: string): boolean {
-  const wh = state.warehouses.find(w => w.id === warehouseId);
-  if (!wh) return false;
-
-  const idx = wh.staff.findIndex(s => s.id === staffId);
-  if (idx === -1) return false;
-
-  wh.staff.splice(idx, 1);
-  state.staff = state.staff.filter(s => s.id !== staffId);
-  return true;
+function countNearby(state: CityState, x: number, y: number, radius: number, types: BuildingType[]): number {
+  let count = 0;
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (!inBounds(state, nx, ny)) continue;
+      if (types.includes(state.tiles[ny][nx].type)) count++;
+    }
+  }
+  return count;
 }
 
-// --- Serialization ---
-export function serializeState(state: GameState): string {
-  return JSON.stringify(state);
+function calculateTileValue(state: CityState, x: number, y: number): { population: number; jobs: number; income: number } {
+  const tile = state.tiles[y][x];
+  const def = BUILDINGS[tile.type];
+  let levelMult = 1 + (tile.level - 1) * 0.5;
+  const taxRate = TAX_LEVELS[state.stats.taxLevel].rate;
+
+  if (tile.type === 'residential') {
+    // Population depends on road access, nearby parks, nearby commercial jobs, not too close to industry
+    const roadBonus = tile.roadDistance <= 1 ? 1 : tile.roadDistance <= 2 ? 0.6 : tile.roadDistance <= 3 ? 0.25 : 0;
+    const parkBonus = Math.min(0.5, countNearby(state, x, y, 3, ['park']) * 0.15);
+    const jobBonus = Math.min(0.6, countNearby(state, x, y, 5, ['commercial', 'industrial']) * 0.08);
+    const industryPenalty = Math.min(0.5, countNearby(state, x, y, 3, ['industrial']) * 0.15);
+    const pop = Math.round(def.population * levelMult * (1 + parkBonus + jobBonus - industryPenalty) * roadBonus);
+    const income = Math.max(0, Math.round(pop * 15 * taxRate));
+    return { population: pop, jobs: 0, income };
+  }
+
+  if (tile.type === 'commercial') {
+    // Commercial needs nearby population
+    const roadBonus = tile.roadDistance <= 1 ? 1 : tile.roadDistance <= 2 ? 0.5 : 0;
+    const populationNearby = countNearby(state, x, y, 5, ['residential']);
+    const demand = Math.min(1 + populationNearby * 0.15, 3);
+    const income = Math.round(def.income * levelMult * demand * roadBonus);
+    return { population: 0, jobs: Math.round(def.jobs * levelMult * roadBonus), income };
+  }
+
+  if (tile.type === 'industrial') {
+    const roadBonus = tile.roadDistance <= 1 ? 1 : tile.roadDistance <= 2 ? 0.6 : 0;
+    const income = Math.round(def.income * levelMult * roadBonus);
+    return { population: Math.round(def.population * levelMult), jobs: Math.round(def.jobs * levelMult * roadBonus), income };
+  }
+
+  if (SERVICE_BUILDINGS.includes(tile.type)) {
+    return { population: 0, jobs: Math.round(def.jobs * levelMult), income: def.income };
+  }
+
+  return { population: 0, jobs: 0, income: 0 };
 }
 
-export function deserializeState(json: string): GameState | null {
+export function gameTick(state: CityState): CityState {
+  const nextState: CityState = {
+    ...state,
+    tiles: cloneGrid(state.tiles),
+    stats: cloneStats(state.stats),
+    toasts: [],
+    updatedAt: new Date().toISOString(),
+  };
+  nextState.stats.tick += 1;
+
+  updateRoadDistances(nextState);
+
+  let totalPop = 0;
+  let totalJobs = 0;
+  let totalIncome = 0;
+  let totalMaintenance = 0;
+  let happiness = 75;
+
+  // Base values from buildings
+  for (let y = 0; y < nextState.gridSize; y++) {
+    for (let x = 0; x < nextState.gridSize; x++) {
+      const tile = nextState.tiles[y][x];
+      const def = BUILDINGS[tile.type];
+      if (tile.type === 'empty' || tile.type === 'road') continue;
+      const value = calculateTileValue(nextState, x, y);
+      tile.population = value.population;
+      tile.jobs = value.jobs;
+      totalPop += value.population;
+      totalJobs += value.jobs;
+      totalIncome += value.income;
+      totalMaintenance += def.maintenance * tile.level;
+      happiness += def.happiness;
+    }
+  }
+
+  // Happiness modifiers
+  const taxDelta = TAX_LEVELS[nextState.stats.taxLevel].happinessDelta;
+  happiness += taxDelta;
+  // Unemployment / job balance
+  if (totalJobs < totalPop * 0.3) happiness -= 8;
+  else if (totalJobs > totalPop * 0.8) happiness += 5;
+  // Too much industry hurts happiness
+  const industrialCount = countType(nextState, 'industrial');
+  const residentialCount = countType(nextState, 'residential');
+  if (residentialCount > 0 && industrialCount > residentialCount * 0.5) happiness -= 5;
+  // Services boost (diminishing returns)
+  const serviceCount = SERVICE_BUILDINGS.reduce((acc, t) => acc + countType(nextState, t), 0);
+  happiness += Math.min(15, serviceCount * 1.5);
+
+  nextState.stats.population = totalPop;
+  nextState.stats.happiness = clamp(happiness, 0, 100);
+  const netIncome = totalIncome - totalMaintenance;
+  nextState.stats.money += netIncome;
+  if (netIncome > 0) nextState.stats.totalEarned += netIncome;
+  else nextState.stats.totalSpent += Math.abs(netIncome);
+
+  // Low money warning
+  if (nextState.stats.money < 2000 && state.stats.money >= 2000) {
+    nextState.toasts.push({ id: generateId(), message: 'Attention : fonds faibles !', type: 'warning' });
+  }
+  if (nextState.stats.money < 0) {
+    nextState.stats.money = 0;
+    nextState.toasts.push({ id: generateId(), message: 'Ville en faillite !', type: 'warning' });
+  }
+
+  return nextState;
+}
+
+function countType(state: CityState, type: BuildingType): number {
+  let count = 0;
+  for (let y = 0; y < state.gridSize; y++) {
+    for (let x = 0; x < state.gridSize; x++) {
+      if (state.tiles[y][x].type === type) count++;
+    }
+  }
+  return count;
+}
+
+function clamp(v: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, v));
+}
+
+export function addToast(state: CityState, message: string, type: 'success' | 'warning' | 'info'): CityState {
+  return {
+    ...state,
+    toasts: [...state.toasts, { id: generateId(), message, type }],
+  };
+}
+
+export function clearToasts(state: CityState): CityState {
+  return { ...state, toasts: [] };
+}
+
+export function serializeState(state: CityState): string {
+  return JSON.stringify({
+    playerId: state.playerId,
+    playerName: state.playerName,
+    gridSize: state.gridSize,
+    tiles: state.tiles,
+    stats: state.stats,
+    selectedCategory: state.selectedCategory,
+    selectedBuilding: state.selectedBuilding,
+    createdAt: state.createdAt,
+    updatedAt: state.updatedAt,
+  });
+}
+
+export function deserializeState(json: string): CityState | null {
   try {
-    const obj = JSON.parse(json);
-    return obj as GameState;
+    const data = JSON.parse(json) as Partial<CityState>;
+    if (!data.tiles || !data.stats) return null;
+    return {
+      playerId: (data.playerId as string) || 'player-cb-1',
+      playerName: (data.playerName as string) || 'Joueur',
+      gridSize: (data.gridSize as number) || GRID_SIZE,
+      tiles: data.tiles as Tile[][],
+      stats: data.stats as GameStats,
+      selectedCategory: (data.selectedCategory as import('./types').ToolbarCategory) || 'road',
+      selectedBuilding: (data.selectedBuilding as BuildingType) || 'road',
+      toasts: [],
+      createdAt: (data.createdAt as string) || new Date().toISOString(),
+      updatedAt: (data.updatedAt as string) || new Date().toISOString(),
+    };
   } catch {
     return null;
   }
 }
+
+export { GRID_SIZE, START_MONEY, TICK_MS, BUILDINGS, CATEGORY_ORDER, TAX_LEVELS };

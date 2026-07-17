@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Québec Logistics Tycoon',
-  description: 'Gère tes entrepôts, livre les magasins du Québec !',
+  title: 'Canada City Builder',
+  description: 'Construis ta ville canadienne, gère l\'économie et fais prospérer tes citoyens.',
 };
 
 export const viewport: Viewport = {

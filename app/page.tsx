@@ -1,816 +1,380 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { GameState, Truck, Store, Warehouse } from '@/lib/types';
+import type { CityState, BuildingType } from '@/lib/types';
 import {
   createInitialState,
   gameTick,
-  dispatchTruck,
-  negotiateContract,
-  buyTruck,
-  upgradeWarehouse,
-  hireStaff,
-  fireStaff,
+  placeBuilding,
+  upgradeBuilding,
+  setSelectedCategory,
+  setSelectedBuilding,
+  setTaxLevel,
   serializeState,
   deserializeState,
+  addToast,
+  clearToasts,
+  getCategoryBuildings,
 } from '@/lib/engine';
 import { saveGame, loadGame } from '@/lib/supabase';
-import MapCanvas from '@/components/MapCanvas';
+import { BUILDINGS, CATEGORY_ORDER, TAX_LEVELS } from '@/lib/gamedata';
+import CityCanvas from '@/components/CityCanvas';
 
-type Tab = 'overview' | 'trucks' | 'stores' | 'warehouses' | 'staff' | 'contracts';
+const TAX_ORDER: Array<keyof typeof TAX_LEVELS> = ['low', 'medium', 'high'];
 
-type Toast = { id: number; message: string; type: 'success' | 'warning' | 'info' };
-
-export default function GamePage() {
-  const [state, setState] = useState<GameState>(() => createInitialState('Emerick'));
-  const [tab, setTab] = useState<Tab>('overview');
-  const [selectedTruckId, setSelectedTruckId] = useState<string | null>(null);
-  const [selectedStoreId, setSelectedStoreId] = useState<string | null>(null);
-  const [selectedWarehouseId, setSelectedWarehouseId] = useState<string | null>(null);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+export default function HomePage() {
+  const [state, setState] = useState<CityState | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [showIntro, setShowIntro] = useState(true);
   const [playerName, setPlayerName] = useState('');
-  const [toasts, setToasts] = useState<Toast[]>([]);
-  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const saveRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const prevStateRef = useRef<GameState | null>(null);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [showStats, setShowStats] = useState(false);
+  const [view, setView] = useState({ scale: 1, offsetX: 0, offsetY: 0 });
+  const lastToastIdsRef = useRef<Set<string>>(new Set());
+  const tickRafRef = useRef<number>(0);
+  const lastTickRef = useRef<number>(0);
 
-  const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
-    const id = Date.now() + Math.random();
-    setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 3000);
-  }, []);
-
-  // Load game on mount
+  // Load on mount
   useEffect(() => {
+    let mounted = true;
     (async () => {
       const saved = await loadGame();
+      if (!mounted) return;
       if (saved) {
-        const deserialized = deserializeState(saved);
-        if (deserialized) {
-          setState(deserialized);
-          setShowIntro(false);
-          addToast('Partie chargée', 'info');
-        }
+        setState(saved);
+        setShowIntro(false);
       }
       setLoaded(true);
     })();
-  }, [addToast]);
-
-  // Game tick loop - every 500ms
-  useEffect(() => {
-    if (!loaded || showIntro) return;
-    tickRef.current = setInterval(() => {
-      setState(prev => {
-        const next = gameTick(prev);
-        prevStateRef.current = prev;
-        return next;
-      });
-    }, 500);
     return () => {
-      if (tickRef.current) clearInterval(tickRef.current);
+      mounted = false;
     };
-  }, [loaded, showIntro]);
+  }, []);
 
-  // Notifications from state changes
+  // Economy tick loop (uses rAF, not setInterval)
   useEffect(() => {
-    const prev = prevStateRef.current;
-    if (!prev || prev.tick === state.tick) return;
-
-    if (state.totalDeliveries > prev.totalDeliveries) {
-      const earned = state.totalEarned - prev.totalEarned;
-      addToast(`Livraison terminée +$${Math.round(earned)}`, 'success');
-    }
-    state.trucks.forEach((t, i) => {
-      const pt = prev.trucks[i];
-      if (pt && t.fuel < 25 && pt.fuel >= 25) {
-        addToast(`${t.name}: carburant faible`, 'warning');
+    if (!state || showIntro) return;
+    let running = true;
+    const loop = (time: number) => {
+      if (!running) return;
+      if (time - lastTickRef.current >= 2000) {
+        lastTickRef.current = time;
+        setState(prev => {
+          if (!prev) return prev;
+          const next = gameTick(prev);
+          return next;
+        });
       }
-    });
-  }, [state, addToast]);
-
-  // Auto-save every 30 seconds
-  useEffect(() => {
-    if (!loaded || showIntro) return;
-    saveRef.current = setInterval(async () => {
-      setSaveStatus('saving');
-      const ok = await saveGame(serializeState(state));
-      setSaveStatus(ok ? 'saved' : 'error');
-      setTimeout(() => setSaveStatus('idle'), 2000);
-    }, 30000);
-    return () => {
-      if (saveRef.current) clearInterval(saveRef.current);
+      tickRafRef.current = requestAnimationFrame(loop);
     };
-  }, [state, loaded, showIntro]);
+    tickRafRef.current = requestAnimationFrame(loop);
+    return () => {
+      running = false;
+      cancelAnimationFrame(tickRafRef.current);
+    };
+  }, [state, showIntro]);
 
-  // Manual save
+  // Auto-save every 30s
+  useEffect(() => {
+    if (!state || showIntro) return;
+    const id = window.setInterval(() => {
+      handleSave();
+    }, 30000);
+    return () => clearInterval(id);
+  }, [state, showIntro]);
+
+  // Handle new toasts
+  useEffect(() => {
+    if (!state) return;
+    for (const toast of state.toasts) {
+      if (!lastToastIdsRef.current.has(toast.id)) {
+        lastToastIdsRef.current.add(toast.id);
+        // Browser toast API fallback if available, otherwise ignore
+      }
+    }
+  }, [state]);
+
   const handleSave = useCallback(async () => {
+    if (!state) return;
     setSaveStatus('saving');
-    const ok = await saveGame(serializeState(state));
+    const ok = await saveGame(state);
     setSaveStatus(ok ? 'saved' : 'error');
-    addToast(ok ? 'Sauvegarde réussie' : 'Erreur de sauvegarde', ok ? 'success' : 'warning');
-    setTimeout(() => setSaveStatus('idle'), 2000);
-  }, [state, addToast]);
+    if (!ok) {
+      setState(prev => (prev ? addToast(prev, 'Erreur de sauvegarde', 'warning') : prev));
+    }
+    window.setTimeout(() => setSaveStatus('idle'), 1500);
+  }, [state]);
 
-  // Start new game
   const startGame = () => {
-    const name = playerName.trim() || 'Emerick';
+    const name = playerName.trim() || 'Joueur';
     const fresh = createInitialState(name);
     setState(fresh);
-    prevStateRef.current = fresh;
     setShowIntro(false);
-    addToast('Nouvelle partie commencée', 'success');
   };
 
-  // Handlers
-  const handleTruckClick = (id: string) => {
-    setSelectedTruckId(id);
-    setTab('trucks');
-  };
-
-  const handleStoreClick = (id: string) => {
-    setSelectedStoreId(id);
-    setTab('stores');
-  };
-
-  const handleWarehouseClick = (id: string) => {
-    setSelectedWarehouseId(id);
-    setTab('warehouses');
-  };
-
-  const handleDispatch = (truckId: string, storeId: string, qty: number) => {
+  const handleTileTap = (x: number, y: number) => {
     setState(prev => {
-      const next = { ...prev };
-      const ok = dispatchTruck(next, truckId, storeId, qty);
-      if (ok) addToast('Camion dispatché', 'info');
-      else addToast('Impossible de dispatcher', 'warning');
-      return next;
+      if (!prev) return prev;
+      const building = prev.selectedBuilding;
+      if (prev.tiles[y][x].type === building) {
+        // Upgrade if same building tapped
+        const upgraded = upgradeBuilding(prev, x, y);
+        if (upgraded.upgraded) {
+          return addToast(clearToasts(upgraded.state), upgraded.message!, 'success');
+        }
+        return clearToasts(upgraded.state);
+      }
+      const result = placeBuilding(prev, x, y, building);
+      if (result.placed) {
+        return addToast(clearToasts(result.state), result.message!, 'success');
+      }
+      return addToast(clearToasts(result.state), result.message || 'Action impossible', 'warning');
     });
   };
 
-  const handleQuickDispatch = () => {
-    const idleTruck = state.trucks.find(t => t.status === 'idle');
-    if (!idleTruck) return;
-    const store = [...state.stores].sort((a, b) => b.demand - a.demand)[0];
-    if (!store) return;
-    const homeWh = state.warehouses.find(w => w.id === idleTruck.homeWarehouseId);
-    const qty = Math.min(idleTruck.capacity, homeWh ? Math.floor(homeWh.stock) : 0, Math.max(1, Math.floor(store.demand / 2)));
-    handleDispatch(idleTruck.id, store.id, qty);
+  const handleCategorySelect = (category: CityState['selectedCategory']) => {
+    setState(prev => (prev ? setSelectedCategory(prev, category) : prev));
   };
 
-  const handleNegotiate = (storeId: string, level: 1 | 2 | 3) => {
+  const handleBuildingSelect = (type: BuildingType) => {
+    setState(prev => (prev ? setSelectedBuilding(prev, type) : prev));
+  };
+
+  const handleTaxChange = () => {
     setState(prev => {
-      const next = { ...prev };
-      const ok = negotiateContract(next, storeId, level);
-      addToast(ok ? 'Contrat signé' : 'Fonds insuffisants', ok ? 'success' : 'warning');
-      return next;
+      if (!prev) return prev;
+      const idx = TAX_ORDER.indexOf(prev.stats.taxLevel);
+      const nextLevel = TAX_ORDER[(idx + 1) % TAX_ORDER.length];
+      return setTaxLevel(prev, nextLevel);
     });
   };
 
-  const handleBuyTruck = (whId: string) => {
-    setState(prev => {
-      const next = { ...prev };
-      const ok = buyTruck(next, whId);
-      addToast(ok ? 'Camion acheté' : 'Fonds insuffisants', ok ? 'success' : 'warning');
-      return next;
-    });
+  const resetView = () => {
+    setView({ scale: 1, offsetX: 0, offsetY: 0 });
   };
 
-  const handleUpgradeWh = (whId: string) => {
-    setState(prev => {
-      const next = { ...prev };
-      const ok = upgradeWarehouse(next, whId);
-      addToast(ok ? 'Entrepôt amélioré' : 'Amélioration impossible', ok ? 'success' : 'warning');
-      return next;
-    });
-  };
+  const formatMoney = (m: number) => `$${Math.round(m).toLocaleString('fr-CA')}`;
 
-  const handleHire = (whId: string, role: 'secretary' | 'dispatcher' | 'loader' | 'manager') => {
-    setState(prev => {
-      const next = { ...prev };
-      const ok = hireStaff(next, whId, role);
-      addToast(ok ? 'Employé engagé' : 'Fonds insuffisants', ok ? 'success' : 'warning');
-      return next;
-    });
-  };
+  if (!loaded) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-emerald-950 via-slate-950 to-black flex items-center justify-center">
+        <div className="text-emerald-400 text-lg font-semibold animate-pulse">Chargement de Canada City Builder...</div>
+      </div>
+    );
+  }
 
-  const handleFire = (whId: string, staffId: string) => {
-    setState(prev => {
-      const next = { ...prev };
-      const ok = fireStaff(next, whId, staffId);
-      addToast(ok ? 'Employé licencié' : 'Action impossible', ok ? 'info' : 'warning');
-      return next;
-    });
-  };
-
-  // --- INTRO SCREEN ---
   if (showIntro) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-emerald-950 via-slate-950 to-cyan-950 text-white p-4">
-        <div className="w-full max-w-xs sm:max-w-sm bg-slate-900/70 rounded-3xl p-6 sm:p-8 backdrop-blur-md border border-slate-700/50 shadow-2xl">
-          <div className="text-center mb-6">
-            <div className="text-5xl mb-3">🚛</div>
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">
-              Québec Logistics Tycoon
-            </h1>
-            <p className="text-sm text-slate-400 mt-2">
-              Construis ton empire logistique dans le corridor Québec-Ontario.
-            </p>
+      <div className="min-h-screen bg-gradient-to-br from-emerald-900 via-slate-900 to-black flex flex-col items-center justify-center p-6 text-center">
+        <div className="max-w-sm w-full space-y-8 animate-fadeIn">
+          <div className="space-y-2">
+            <div className="text-5xl mb-2">🍁</div>
+            <h1 className="text-3xl font-extrabold text-white tracking-tight">Canada City Builder</h1>
+            <p className="text-emerald-200 text-sm">Construis ta ville, gère l'économie et fais prospérer tes citoyens.</p>
           </div>
 
-          <div className="space-y-4">
-            <input
-              type="text"
-              placeholder="Ton nom de joueur"
-              value={playerName}
-              onChange={e => setPlayerName(e.target.value)}
-              className="w-full bg-slate-800 text-white px-4 py-3 rounded-xl border border-slate-700 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 outline-none transition text-sm"
-              onKeyDown={e => e.key === 'Enter' && startGame()}
-            />
+          <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl p-5 space-y-4">
+            <label className="block text-left text-sm text-slate-300">
+              Nom du maire
+              <input
+                type="text"
+                value={playerName}
+                onChange={e => setPlayerName(e.target.value)}
+                placeholder="Entre ton nom"
+                maxLength={20}
+                className="mt-2 w-full rounded-xl bg-slate-900/80 border border-slate-700 px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+            </label>
             <button
               onClick={startGame}
-              className="w-full bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-emerald-900/40 transition active:scale-95"
+              className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-700 px-6 py-4 font-bold text-white shadow-lg shadow-emerald-900/40 active:scale-95 transition-transform"
             >
-              Commencer à jouer
+              Commencer à construire
             </button>
           </div>
 
-          {loaded && (
-            <p className="text-center text-xs text-slate-500 mt-5">
-              {state.tick > 0 ? 'Ancienne partie chargée — clique pour continuer' : 'Aucune sauvegarde trouvée'}
-            </p>
-          )}
+          <p className="text-xs text-slate-500">Optimisé pour mobile • 375px+</p>
         </div>
       </div>
     );
   }
 
-  // --- MAIN GAME UI ---
-  const selectedTruck = state.trucks.find(t => t.id === selectedTruckId);
-  const selectedStore = state.stores.find(s => s.id === selectedStoreId);
-  const selectedWh = state.warehouses.find(w => w.id === selectedWarehouseId);
-  const hasIdleTruck = state.trucks.some(t => t.status === 'idle');
+  if (!state) return null;
 
-  const tabs: { id: Tab; label: string; icon: string }[] = [
-    { id: 'overview', label: 'Vue', icon: '📊' },
-    { id: 'trucks', label: 'Camions', icon: '🚛' },
-    { id: 'stores', label: 'Magasins', icon: '🏪' },
-    { id: 'warehouses', label: 'Entrepôts', icon: '🏭' },
-    { id: 'staff', label: 'Staff', icon: '👥' },
-    { id: 'contracts', label: 'Contrats', icon: '🤝' },
-  ];
+  const currentBuildings = getCategoryBuildings(state.selectedCategory);
 
   return (
-    <div className="h-screen w-screen bg-slate-950 text-white flex flex-col overflow-hidden">
-      {/* Toasts */}
-      <div className="fixed top-2 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-[90vw] max-w-sm">
-        {toasts.map(t => (
-          <div
-            key={t.id}
-            className={`px-4 py-2 rounded-full text-sm font-medium shadow-lg border backdrop-blur-md animate-in fade-in slide-in-from-top-2 ${
-              t.type === 'success' ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-100' :
-              t.type === 'warning' ? 'bg-amber-500/20 border-amber-500/40 text-amber-100' :
-              'bg-slate-700/70 border-slate-500/40 text-white'
-            }`}
-          >
-            {t.message}
+    <div className="h-screen w-screen bg-slate-950 flex flex-col overflow-hidden">
+      {/* Top bar */}
+      <header className="flex-none z-20 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-3 py-2">
+        <div className="flex items-center justify-between max-w-md mx-auto">
+          <div className="flex items-center gap-1.5">
+            <span className="text-lg">🍁</span>
+            <span className="font-bold text-sm text-white truncate max-w-[90px]">Canada City</span>
           </div>
-        ))}
-      </div>
-
-      {/* Compact top bar */}
-      <header className="shrink-0 bg-slate-900/80 backdrop-blur border-b border-slate-800 px-3 py-2 flex items-center justify-between gap-2 z-10">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="text-lg">🚛</span>
-          <div className="flex items-center gap-2 text-xs sm:text-sm">
-            <Badge color="green">${state.money.toLocaleString()}</Badge>
-            <span className="text-slate-400">J{state.day}</span>
-            <span className="text-amber-400">⭐ {state.reputation.toFixed(1)}</span>
+          <div className="flex items-center gap-3 text-xs">
+            <div className="flex flex-col items-end">
+              <span className="text-emerald-400 font-bold">{formatMoney(state.stats.money)}</span>
+              <span className="text-slate-400">Argent</span>
+            </div>
+            <div className="flex flex-col items-end">
+              <span className="text-blue-400 font-bold">{state.stats.population}</span>
+              <span className="text-slate-400">Hab.</span>
+            </div>
+            <div className="flex flex-col items-end">
+              <span className="text-amber-400 font-bold">{state.stats.happiness}%</span>
+              <span className="text-slate-400">Bonheur</span>
+            </div>
           </div>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
-          <span className="text-[10px] text-slate-500 hidden sm:inline">
-            {saveStatus === 'saving' ? 'Sauvegarde...' : saveStatus === 'saved' ? 'Sauvegardé' : saveStatus === 'error' ? 'Erreur' : ''}
-          </span>
+      </header>
+
+      {/* Canvas area */}
+      <main className="flex-1 relative min-h-0">
+        <CityCanvas
+          state={state}
+          view={view}
+          onViewChange={setView}
+          onTileTap={handleTileTap}
+          selectedBuilding={state.selectedBuilding}
+        />
+
+        {/* Floating controls */}
+        <div className="absolute top-3 right-3 flex flex-col gap-2">
+          <button
+            onClick={() => setShowStats(true)}
+            className="w-10 h-10 rounded-full bg-slate-800/80 backdrop-blur text-white border border-slate-700 flex items-center justify-center text-lg shadow-lg active:scale-90 transition-transform"
+            aria-label="Statistiques"
+          >
+            📊
+          </button>
+          <button
+            onClick={resetView}
+            className="w-10 h-10 rounded-full bg-slate-800/80 backdrop-blur text-white border border-slate-700 flex items-center justify-center text-lg shadow-lg active:scale-90 transition-transform"
+            aria-label="Recentrer"
+          >
+            🎯
+          </button>
           <button
             onClick={handleSave}
-            className="text-[10px] sm:text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 px-2 py-1 rounded-md transition active:scale-95"
+            disabled={saveStatus === 'saving'}
+            className="w-10 h-10 rounded-full bg-emerald-700/80 backdrop-blur text-white border border-emerald-600 flex items-center justify-center text-lg shadow-lg active:scale-90 transition-transform disabled:opacity-60"
+            aria-label="Sauvegarder"
           >
             💾
           </button>
         </div>
-      </header>
 
-      {/* Main layout: mobile map top 50%, panel bottom; desktop map left 60%, panel right */}
-      <div className="flex-1 flex flex-col lg:flex-row min-h-0">
-        {/* Map */}
-        <div className="h-[50%] lg:h-auto lg:flex-[1.5] bg-slate-950 p-1.5 min-h-0">
-          <div className="w-full h-full rounded-2xl overflow-hidden border border-slate-800 shadow-inner bg-slate-900">
-            <MapCanvas
-              state={state}
-              onTruckClick={handleTruckClick}
-              onStoreClick={handleStoreClick}
-              onWarehouseClick={handleWarehouseClick}
-              selectedTruckId={selectedTruckId}
-              selectedStoreId={selectedStoreId}
-            />
-          </div>
-        </div>
-
-        {/* Control panel */}
-        <div className="flex-1 lg:flex-[1] bg-slate-900 border-t lg:border-t-0 lg:border-l border-slate-800 flex flex-col min-h-0">
-          {/* Tabs */}
-          <div className="shrink-0 overflow-x-auto border-b border-slate-800 scrollbar-hide">
-            <div className="flex px-2 py-2 gap-1 min-w-max">
-              {tabs.map(t => (
-                <button
-                  key={t.id}
-                  onClick={() => setTab(t.id)}
-                  className={`flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-semibold transition whitespace-nowrap ${
-                    tab === t.id
-                      ? 'bg-gradient-to-r from-emerald-600 to-cyan-600 text-white shadow-md'
-                      : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
-                  }`}
-                >
-                  <span>{t.icon}</span>
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Tab content */}
-          <div className="flex-1 overflow-y-auto p-3 space-y-3 min-h-0">
-            {tab === 'overview' && <OverviewTab state={state} />}
-            {tab === 'trucks' && (
-              <TrucksTab
-                state={state}
-                selectedTruck={selectedTruck}
-                selectedStoreId={selectedStoreId}
-                selectedStore={selectedStore}
-                onDispatch={handleDispatch}
-              />
-            )}
-            {tab === 'stores' && (
-              <StoresTab
-                state={state}
-                selectedStore={selectedStore}
-                onNegotiate={handleNegotiate}
-              />
-            )}
-            {tab === 'warehouses' && (
-              <WarehousesTab
-                state={state}
-                selectedWh={selectedWh}
-                onBuyTruck={handleBuyTruck}
-                onUpgrade={handleUpgradeWh}
-              />
-            )}
-            {tab === 'staff' && (
-              <StaffTab
-                state={state}
-                selectedWh={selectedWh}
-                onHire={handleHire}
-                onFire={handleFire}
-              />
-            )}
-            {tab === 'contracts' && <ContractsTab state={state} onNegotiate={handleNegotiate} />}
-          </div>
-        </div>
-      </div>
-
-      {/* Quick dispatch FAB */}
-      {hasIdleTruck && (
+        {/* Tax badge */}
         <button
-          onClick={handleQuickDispatch}
-          className="fixed bottom-20 right-4 z-40 flex items-center gap-2 px-4 py-3 rounded-full bg-gradient-to-r from-emerald-500 to-cyan-500 text-white text-sm font-bold shadow-xl shadow-emerald-900/50 active:scale-95 transition lg:bottom-6"
+          onClick={handleTaxChange}
+          className="absolute top-3 left-3 px-3 py-1.5 rounded-full bg-slate-800/80 backdrop-blur border border-slate-700 text-xs font-semibold text-white active:scale-95 transition-transform"
         >
-          ⚡ Livraison rapide
+          Taxe: {TAX_LEVELS[state.stats.taxLevel].label}
         </button>
-      )}
-    </div>
-  );
-}
 
-function Badge({ children, color }: { children: React.ReactNode; color: 'green' | 'blue' | 'amber' | 'slate' }) {
-  const map = {
-    green: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
-    blue: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
-    amber: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-    slate: 'bg-slate-700 text-slate-300 border-slate-600',
-  };
-  return (
-    <span className={`px-2 py-0.5 rounded-md border text-xs font-bold ${map[color]}`}>
-      {children}
-    </span>
-  );
-}
-
-// --- Tab Components ---
-
-function OverviewTab({ state }: { state: GameState }) {
-  return (
-    <div className="space-y-3">
-      <Card title="📊 Statistiques">
-        <div className="grid grid-cols-2 gap-2 text-xs sm:text-sm">
-          <Pill label="Argent" value={`$${state.money.toLocaleString()}`} valueColor="text-emerald-400" />
-          <Pill label="Jour" value={`J${state.day}`} />
-          <Pill label="Camions" value={String(state.trucks.length)} />
-          <Pill label="Entrepôts" value={String(state.warehouses.length)} />
-          <Pill label="Personnel" value={String(state.staff.length)} />
-          <Pill label="Livraisons" value={String(state.totalDeliveries)} />
-          <Pill label="Revenu" value={`$${state.totalEarned.toLocaleString()}`} valueColor="text-emerald-400" />
-          <Pill label="Dépenses" value={`$${state.totalSpent.toLocaleString()}`} valueColor="text-red-400" />
-          <Pill label="Réputation" value={`${state.reputation.toFixed(1)}/100`} valueColor="text-amber-400" />
-          <Pill label="Contrats" value={String(state.contracts.filter(c => c.active).length)} />
-        </div>
-      </Card>
-
-      <Card title="🚛 Camions">
-        {state.trucks.length === 0 && <p className="text-slate-500 text-xs">Aucun camion</p>}
-        {state.trucks.map(t => (
-          <div key={t.id} className="text-xs bg-slate-800/70 rounded-lg p-2 mb-1.5 border border-slate-700">
-            <div className="flex justify-between">
-              <span className="font-bold text-slate-200">{t.name}</span>
-              <StatusBadge status={t.status} />
-            </div>
-            <div className="text-slate-400 mt-1">Carb. {t.fuel.toFixed(0)}% • État {t.condition.toFixed(0)}% • Liv. {t.totalDeliveries}</div>
-            {t.cargo && <div className="text-orange-400 mt-1">📦 {t.cargo.quantity} unités → {t.cargo.type}</div>}
+        {/* Save status toast */}
+        {saveStatus !== 'idle' && (
+          <div className="absolute top-14 left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-full text-xs font-semibold shadow-lg animate-fadeIn bg-slate-800 text-white border border-slate-700">
+            {saveStatus === 'saving' ? 'Sauvegarde...' : saveStatus === 'saved' ? 'Sauvegardé !' : 'Erreur de sauvegarde'}
           </div>
-        ))}
-      </Card>
+        )}
+      </main>
 
-      <Card title="🏭 Entrepôts">
-        {state.warehouses.map(wh => (
-          <div key={wh.id} className="text-xs bg-slate-800/70 rounded-lg p-2 mb-1.5 border border-slate-700">
-            <div className="flex justify-between">
-              <span className="font-bold text-slate-200">{wh.cityName}</span>
-              <span className="text-slate-400">Lv{wh.level}</span>
-            </div>
-            <div className="text-slate-400">Stock {Math.floor(wh.stock)}/{wh.capacity} • Staff {wh.staff.length} • Camions {wh.trucks.length}</div>
-            <div className="w-full bg-slate-900 h-1.5 rounded-full mt-1.5">
-              <div className="bg-emerald-500 h-1.5 rounded-full transition-all" style={{ width: `${Math.min(100, (wh.stock / wh.capacity) * 100)}%` }} />
-            </div>
-          </div>
-        ))}
-      </Card>
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: Truck['status'] }) {
-  const map: Record<Truck['status'], { label: string; color: string }> = {
-    idle: { label: 'Inactif', color: 'bg-slate-600 text-slate-100' },
-    loading: { label: 'Chargement', color: 'bg-yellow-600 text-yellow-100' },
-    en_route: { label: 'En route', color: 'bg-cyan-600 text-cyan-100' },
-    unloading: { label: 'Déchargement', color: 'bg-orange-600 text-orange-100' },
-    returning: { label: 'Retour', color: 'bg-indigo-600 text-indigo-100' },
-  };
-  const s = map[status];
-  return <span className={`text-[10px] px-1.5 py-0.5 rounded-md font-bold ${s.color}`}>{s.label}</span>;
-}
-
-function TrucksTab({
-  state,
-  selectedTruck,
-  selectedStoreId,
-  selectedStore,
-  onDispatch,
-}: {
-  state: GameState;
-  selectedTruck: Truck | undefined;
-  selectedStoreId: string | null;
-  selectedStore: Store | undefined;
-  onDispatch: (truckId: string, storeId: string, qty: number) => void;
-}) {
-  const [qty, setQty] = useState(20);
-  return (
-    <div className="space-y-3">
-      {selectedTruck && (
-        <Card title={`🚛 ${selectedTruck.name}`} accent="blue">
-          <div className="text-sm space-y-1 text-slate-200">
-            <Pill label="Statut" value={selectedTruck.status} />
-            <Pill label="Capacité" value={String(selectedTruck.capacity)} />
-            <Pill label="Carburant" value={`${selectedTruck.fuel.toFixed(0)}%`} />
-            <Pill label="État" value={`${selectedTruck.condition.toFixed(0)}%`} />
-            <Pill label="Livraisons" value={String(selectedTruck.totalDeliveries)} />
-            <Pill label="Gains" value={`$${selectedTruck.totalEarnings.toFixed(0)}`} valueColor="text-emerald-400" />
-            {selectedTruck.cargo && <Pill label="Cargo" value={`${selectedTruck.cargo.quantity} → ${selectedTruck.cargo.type}`} valueColor="text-orange-400" />}
-            {selectedTruck.assignedByAI && <Pill label="" value="🤖 Auto-dispatché" valueColor="text-amber-400" />}
-          </div>
-        </Card>
-      )}
-
-      {selectedTruck && selectedTruck.status === 'idle' && selectedStoreId && (
-        <Card title="📦 Dispatch" accent="green">
-          <div className="space-y-2">
-            <div className="text-xs text-slate-400">
-              Destination: <span className="text-white font-semibold">{selectedStore?.chainName} — {selectedStore?.cityName}</span>
-            </div>
-            <label className="text-xs text-slate-400">Quantité: {qty}</label>
-            <input
-              type="range"
-              min="1"
-              max={selectedTruck.capacity}
-              value={qty}
-              onChange={e => setQty(Number(e.target.value))}
-              className="w-full accent-emerald-500"
-            />
-            <button
-              onClick={() => onDispatch(selectedTruck.id, selectedStoreId, qty)}
-              className="w-full bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold py-2.5 rounded-xl transition active:scale-95 text-sm"
-            >
-              Dispatcher {qty} unités
-            </button>
-          </div>
-        </Card>
-      )}
-
-      {!selectedTruck && (
-        <Card title="Tous les camions">
-          <p className="text-xs text-slate-500 mb-2">Clique sur un camion sur la carte</p>
-          {state.trucks.map(t => (
-            <button
-              key={t.id}
-              onClick={() => {}}
-              className="w-full text-left text-sm bg-slate-800/70 rounded-lg p-2 mb-1.5 border border-slate-700 hover:border-slate-600 transition"
-            >
-              <div className="flex justify-between">
-                <span className="font-bold text-slate-200">{t.name}</span>
-                <StatusBadge status={t.status} />
-              </div>
-              <div className="text-xs text-slate-400">Carb. {t.fuel.toFixed(0)}% • État {t.condition.toFixed(0)}% • Liv. {t.totalDeliveries}</div>
-            </button>
-          ))}
-        </Card>
-      )}
-
-      {selectedTruck && selectedTruck.status === 'idle' && !selectedStoreId && (
-        <div className="bg-slate-800/50 rounded-xl p-3 text-sm text-slate-400 border border-slate-700">
-          Clique sur un magasin sur la carte pour choisir la destination
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StoresTab({
-  state,
-  selectedStore,
-  onNegotiate,
-}: {
-  state: GameState;
-  selectedStore: Store | undefined;
-  onNegotiate: (storeId: string, level: 1 | 2 | 3) => void;
-}) {
-  return (
-    <div className="space-y-3">
-      {selectedStore && (
-        <Card title={`${selectedStore.chainName} — ${selectedStore.cityName}`}>
-          <div className="text-sm space-y-1">
-            <Pill label="Demande" value={`${selectedStore.demand.toFixed(0)}/100`} valueColor={selectedStore.demand > 70 ? 'text-red-400' : selectedStore.demand > 40 ? 'text-amber-400' : 'text-emerald-400'} />
-            <Pill label="Contrat" value={selectedStore.contractLevel > 0 ? `Niveau ${selectedStore.contractLevel}` : 'Aucun'} />
-          </div>
-          <div className="mt-3 space-y-2">
-            <p className="text-xs text-slate-400">Négocier un contrat :</p>
-            <button onClick={() => onNegotiate(selectedStore.id, 1)} className="w-full bg-slate-800 hover:bg-slate-700 text-sm py-2.5 rounded-xl border border-slate-700 transition">
-              L1 Base — $500 — 1.3x
-            </button>
-            <button onClick={() => onNegotiate(selectedStore.id, 2)} className="w-full bg-slate-800 hover:bg-slate-700 text-sm py-2.5 rounded-xl border border-slate-700 transition">
-              L2 Préféré — $2,000 — 1.6x
-            </button>
-            <button onClick={() => onNegotiate(selectedStore.id, 3)} className="w-full bg-slate-800 hover:bg-slate-700 text-sm py-2.5 rounded-xl border border-slate-700 transition">
-              L3 Exclusif — $8,000 — 1.9x
-            </button>
-          </div>
-        </Card>
-      )}
-
-      {!selectedStore && (
-        <Card title="Magasins">
-          <p className="text-xs text-slate-500 mb-2">Clique sur un magasin pour négocier</p>
-          <div className="space-y-1">
-            {state.stores.map(s => (
+      {/* Bottom toolbar */}
+      <footer className="flex-none z-20 bg-slate-900/95 backdrop-blur-md border-t border-slate-800">
+        {/* Category strip */}
+        <div className="flex items-center gap-1 px-2 py-2 overflow-x-auto scrollbar-hide">
+          {CATEGORY_ORDER.map(cat => {
+            const active = state.selectedCategory === cat.category;
+            return (
               <button
-                key={s.id}
-                onClick={() => onNegotiate(s.id, 1)}
-                className="w-full text-left text-sm bg-slate-800/70 rounded-lg p-2 flex justify-between items-center border border-slate-700 hover:border-slate-600 transition"
+                key={cat.id}
+                onClick={() => handleCategorySelect(cat.category)}
+                className={`flex-shrink-0 flex flex-col items-center gap-0.5 px-3 py-2 rounded-xl text-xs font-semibold transition-colors ${
+                  active
+                    ? 'bg-slate-800 text-white border border-slate-700'
+                    : 'text-slate-400 hover:bg-slate-800/50'
+                }`}
+                style={{ borderColor: active ? cat.accent : undefined }}
               >
-                <span className="flex items-center gap-2">
-                  <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ backgroundColor: getChainColor(s.chainId) }} />
-                  {s.chainName} — {s.cityName}
-                </span>
-                <span className="text-xs text-slate-400">
-                  {s.contractLevel > 0 ? `L${s.contractLevel}` : '—'} | {s.demand.toFixed(0)}
-                </span>
+                <span className="text-lg">{cat.icon}</span>
+                <span>{cat.label}</span>
               </button>
-            ))}
-          </div>
-        </Card>
-      )}
-    </div>
-  );
-}
-
-function WarehousesTab({
-  state,
-  selectedWh,
-  onBuyTruck,
-  onUpgrade,
-}: {
-  state: GameState;
-  selectedWh: Warehouse | undefined;
-  onBuyTruck: (whId: string) => void;
-  onUpgrade: (whId: string) => void;
-}) {
-  return (
-    <div className="space-y-3">
-      {selectedWh && (
-        <Card title={`🏭 ${selectedWh.cityName}`} accent="green">
-          <div className="text-sm space-y-1 text-slate-200">
-            <Pill label="Niveau" value={String(selectedWh.level)} />
-            <Pill label="Capacité" value={String(selectedWh.capacity)} />
-            <Pill label="Stock" value={String(Math.floor(selectedWh.stock))} />
-            <Pill label="Camions" value={String(selectedWh.trucks.length)} />
-            <Pill label="Personnel" value={String(selectedWh.staff.length)} />
-          </div>
-          <div className="mt-3 space-y-2">
-            <button onClick={() => onBuyTruck(selectedWh.id)} className="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold py-2.5 rounded-xl text-sm transition active:scale-95">
-              🚛 Acheter camion ($8,000)
-            </button>
-            {selectedWh.level < 5 && (
-              <button onClick={() => onUpgrade(selectedWh.id)} className="w-full bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white font-bold py-2.5 rounded-xl text-sm transition active:scale-95">
-                ⬆️ Améliorer Lv{selectedWh.level + 1} — ${selectedWh.level * 5000}
-              </button>
-            )}
-          </div>
-        </Card>
-      )}
-
-      {!selectedWh && (
-        <Card title="Entrepôts">
-          <p className="text-xs text-slate-500 mb-2">Clique sur un entrepôt sur la carte</p>
-          {state.warehouses.map(wh => (
-            <button
-              key={wh.id}
-              className="w-full text-left text-sm bg-slate-800/70 rounded-lg p-2 mb-1.5 border border-slate-700 hover:border-slate-600 transition"
-            >
-              <div className="flex justify-between">
-                <span className="font-bold text-slate-200">{wh.cityName}</span>
-                <span className="text-slate-400">Lv{wh.level}</span>
-              </div>
-              <div className="text-xs text-slate-400">Stock {Math.floor(wh.stock)}/{wh.capacity} • Camions {wh.trucks.length} • Staff {wh.staff.length}</div>
-            </button>
-          ))}
-        </Card>
-      )}
-    </div>
-  );
-}
-
-function StaffTab({
-  state,
-  selectedWh,
-  onHire,
-  onFire,
-}: {
-  state: GameState;
-  selectedWh: Warehouse | undefined;
-  onHire: (whId: string, role: 'secretary' | 'dispatcher' | 'loader' | 'manager') => void;
-  onFire: (whId: string, staffId: string) => void;
-}) {
-  const roles: { role: 'secretary' | 'dispatcher' | 'loader' | 'manager'; label: string; cost: number; salary: number; desc: string }[] = [
-    { role: 'loader', label: 'Chargeur', cost: 300, salary: 175, desc: '+10 stock/jour' },
-    { role: 'dispatcher', label: 'Dispatcheur', cost: 500, salary: 300, desc: 'Auto-dispatch' },
-    { role: 'secretary', label: 'Secrétaire', cost: 350, salary: 200, desc: 'Gère les contrats' },
-    { role: 'manager', label: 'Manager', cost: 600, salary: 400, desc: '+efficacité' },
-  ];
-
-  return (
-    <div className="space-y-3">
-      {selectedWh && (
-        <Card title={`👥 ${selectedWh.cityName}`} accent="slate">
-          <div className="space-y-1 mb-3">
-            {selectedWh.staff.length === 0 && <p className="text-xs text-slate-500">Aucun employé</p>}
-            {selectedWh.staff.map(s => (
-              <div key={s.id} className="text-sm bg-slate-800/70 rounded-lg p-2 flex justify-between items-center border border-slate-700">
-                <div className="min-w-0">
-                  <div className="font-bold text-slate-200 truncate">{s.name}</div>
-                  <div className="text-xs text-slate-400">{roleLabel(s.role)} • Effic. {s.efficiency}/10 • ${s.salary}/j</div>
-                </div>
-                <button onClick={() => onFire(selectedWh.id, s.id)} className="text-xs bg-red-600/80 hover:bg-red-500 text-white px-2 py-1 rounded-md shrink-0">Licencier</button>
-              </div>
-            ))}
-          </div>
-          <div className="space-y-2">
-            <p className="text-xs text-slate-400">Embaucher :</p>
-            {roles.map(r => (
-              <button
-                key={r.role}
-                onClick={() => onHire(selectedWh.id, r.role)}
-                className="w-full bg-slate-800 hover:bg-slate-700 text-sm py-2.5 rounded-xl border border-slate-700 transition text-left px-3"
-              >
-                <span className="font-bold text-slate-200">{r.label}</span> — ${r.cost} <span className="text-slate-400 text-xs">(${r.salary}/j)</span>
-                <div className="text-xs text-slate-400">{r.desc}</div>
-              </button>
-            ))}
-          </div>
-        </Card>
-      )}
-
-      {!selectedWh && (
-        <Card title="Personnel">
-          <p className="text-xs text-slate-500 mb-2">Clique sur un entrepôt pour gérer son personnel</p>
-          {state.warehouses.map(wh => (
-            <div key={wh.id} className="text-sm bg-slate-800/70 rounded-lg p-2 mb-1.5 border border-slate-700">
-              <div className="font-bold text-slate-200">{wh.cityName}</div>
-              <div className="text-xs text-slate-400">{wh.staff.length} employés</div>
-              {wh.staff.map(s => (
-                <div key={s.id} className="text-xs text-slate-400 pl-2">• {s.name} ({roleLabel(s.role)})</div>
-              ))}
-            </div>
-          ))}
-        </Card>
-      )}
-    </div>
-  );
-}
-
-function roleLabel(role: 'secretary' | 'dispatcher' | 'loader' | 'manager') {
-  const labels: Record<'secretary' | 'dispatcher' | 'loader' | 'manager', string> = {
-    secretary: 'Secrétaire', dispatcher: 'Dispatcheur', loader: 'Chargeur', manager: 'Manager',
-  };
-  return labels[role];
-}
-
-function ContractsTab({
-  state,
-  onNegotiate,
-}: {
-  state: GameState;
-  onNegotiate: (storeId: string, level: 1 | 2 | 3) => void;
-}) {
-  const activeContracts = state.contracts.filter(c => c.active);
-  return (
-    <div className="space-y-3">
-      <Card title="🤝 Contrats actifs">
-        {activeContracts.length === 0 && <p className="text-xs text-slate-500">Aucun contrat actif.</p>}
-        {activeContracts.map(c => (
-          <div key={c.id} className="text-sm bg-slate-800/70 rounded-lg p-2 mb-1.5 border border-slate-700">
-            <div className="font-bold text-slate-200">{c.storeName}</div>
-            <div className="text-xs text-slate-400">L{c.level} • ${c.paymentPerDelivery.toFixed(0)}/livraison • Min {c.minDeliveriesPerWeek}/sem.</div>
-          </div>
-        ))}
-      </Card>
-
-      <Card title="💡 Magasins sans contrat">
-        <div className="space-y-1 max-h-60 overflow-auto pr-1">
-          {state.stores.filter(s => s.contractLevel === 0).map(s => (
-            <div key={s.id} className="text-sm bg-slate-800/70 rounded-lg p-2 flex justify-between items-center border border-slate-700">
-              <span className="truncate">{s.chainName} — {s.cityName}</span>
-              <div className="flex gap-1 shrink-0">
-                <button onClick={() => onNegotiate(s.id, 1)} className="text-xs bg-emerald-700 hover:bg-emerald-600 text-white px-2 py-1 rounded-md">L1</button>
-                <button onClick={() => onNegotiate(s.id, 2)} className="text-xs bg-amber-700 hover:bg-amber-600 text-white px-2 py-1 rounded-md">L2</button>
-                <button onClick={() => onNegotiate(s.id, 3)} className="text-xs bg-red-700 hover:bg-red-600 text-white px-2 py-1 rounded-md">L3</button>
-              </div>
-            </div>
-          ))}
-          {state.stores.filter(s => s.contractLevel === 0).length === 0 && <p className="text-xs text-slate-500">Tous les magasins ont un contrat !</p>}
+            );
+          })}
         </div>
-      </Card>
+
+        {/* Building cards */}
+        {state.selectedCategory !== 'bulldoze' && (
+          <div className="flex items-center gap-2 px-3 pb-3 overflow-x-auto">
+            {currentBuildings.map(type => {
+              const def = BUILDINGS[type];
+              const active = state.selectedBuilding === type;
+              const affordable = state.stats.money >= def.cost;
+              return (
+                <button
+                  key={type}
+                  onClick={() => handleBuildingSelect(type)}
+                  disabled={!affordable && type !== 'road'}
+                  className={`flex-shrink-0 w-24 rounded-xl p-2.5 text-left border transition-all ${
+                    active
+                      ? 'bg-slate-800 border-emerald-500 shadow-lg shadow-emerald-900/30'
+                      : 'bg-slate-800/50 border-slate-700 hover:bg-slate-800'
+                  } ${!affordable && type !== 'road' ? 'opacity-50' : ''}`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-lg">{def.icon}</span>
+                    <span className="text-[10px] font-bold text-emerald-400">{def.cost === 0 ? 'Gratuit' : `$${def.cost.toLocaleString('fr-CA')}`}</span>
+                  </div>
+                  <div className="text-xs font-semibold text-white leading-tight">{def.label}</div>
+                  <div className="text-[10px] text-slate-400 leading-tight mt-0.5 line-clamp-2">{def.description}</div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {state.selectedCategory === 'bulldoze' && (
+          <div className="px-3 pb-3 text-xs text-slate-400 text-center">Tape un bâtiment pour le détruire (remboursement partiel).</div>
+        )}
+      </footer>
+
+      {/* Stats modal */}
+      {showStats && (
+        <div className="absolute inset-0 z-30 bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="w-full max-w-md bg-slate-900 rounded-t-2xl sm:rounded-2xl border border-slate-800 shadow-2xl p-5 space-y-4 animate-slideUp">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">Statistiques de la ville</h2>
+              <button onClick={() => setShowStats(false)} className="text-slate-400 text-xl">✕</button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <Stat label="Argent" value={formatMoney(state.stats.money)} color="text-emerald-400" />
+              <Stat label="Population" value={state.stats.population.toLocaleString('fr-CA')} color="text-blue-400" />
+              <Stat label="Bonheur" value={`${state.stats.happiness}%`} color="text-amber-400" />
+              <Stat label="Taxe" value={TAX_LEVELS[state.stats.taxLevel].label} color="text-purple-400" />
+              <Stat label="Routes" value={`${state.stats.roadsBuilt}`} color="text-slate-300" />
+              <Stat label="Bâtiments" value={`${state.stats.buildingsBuilt}`} color="text-slate-300" />
+              <Stat label="Revenus totaux" value={formatMoney(state.stats.totalEarned)} color="text-emerald-400" />
+              <Stat label="Dépenses totales" value={formatMoney(state.stats.totalSpent)} color="text-rose-400" />
+            </div>
+
+            <div className="text-xs text-slate-500 pt-2 border-t border-slate-800">
+              Maire: {state.playerName} • Tick #{state.stats.tick}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function Card({ title, children, accent }: { title: string; children: React.ReactNode; accent?: 'green' | 'blue' | 'slate' }) {
-  const accentClass =
-    accent === 'green' ? 'border-l-4 border-l-emerald-500' :
-    accent === 'blue' ? 'border-l-4 border-l-cyan-500' :
-    accent === 'slate' ? 'border-l-4 border-l-slate-500' : '';
+function Stat({ label, value, color }: { label: string; value: string; color: string }) {
   return (
-    <div className={`bg-slate-800/50 rounded-2xl p-3 border border-slate-700/50 shadow-sm backdrop-blur-sm ${accentClass}`}>
-      <h3 className="font-bold text-emerald-400 mb-2 text-sm">{title}</h3>
-      {children}
+    <div className="bg-slate-800/50 rounded-xl p-3 border border-slate-800">
+      <div className={`text-sm font-bold ${color}`}>{value}</div>
+      <div className="text-[10px] text-slate-400 uppercase tracking-wide">{label}</div>
     </div>
   );
-}
-
-function Pill({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
-  return (
-    <div className="flex justify-between bg-slate-900/50 rounded-lg px-2 py-1">
-      <span className="text-slate-400 text-xs">{label}</span>
-      <span className={`text-xs font-bold ${valueColor || 'text-slate-200'}`}>{value}</span>
-    </div>
-  );
-}
-
-function getChainColor(chainId: string): string {
-  const colors: Record<string, string> = {
-    superc: '#f87171', iga: '#fbbf24', maxi: '#34d399', metro: '#fde047',
-    provigo: '#60a5fa', walmart: '#38bdf8', costco: '#a5f3fc',
-  };
-  return colors[chainId] || '#9ca3af';
 }

@@ -29,6 +29,15 @@ input, textarea {
   border-radius: 4px;
 }
 
+/* Hide horizontal scrollbar in toolbar */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 /* Smooth animations */
 @keyframes slideUp {
   from { transform: translateY(100%); opacity: 0; }

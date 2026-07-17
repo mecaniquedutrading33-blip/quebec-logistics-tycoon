@@ -1,80 +1,172 @@
-// Quebec Logistics Tycoon - Map Data
-// Cities from Toronto to Quebec with real store chains
+// Canada City Builder - Building definitions and economy data
 
-import type { City, StoreChain, Store, Point } from './types';
+import type { BuildingDef, BuildingType, TaxLevel } from './types';
 
-// Canvas coordinate space: 0-1000 in both axes
-// Toronto is left, Quebec City is right, roughly following the corridor
+export const GRID_SIZE = 30;
+export const START_MONEY = 50000;
+export const TICK_MS = 2000; // economy tick every 2s
 
-export const CITIES: City[] = [
-  { id: 'toronto',     name: 'Toronto',      province: 'ON', pos: { x: 80,  y: 620 }, isWarehouse: true },
-  { id: 'oshawa',      name: 'Oshawa',       province: 'ON', pos: { x: 140, y: 590 }, isWarehouse: false },
-  { id: 'kingston',    name: 'Kingston',     province: 'ON', pos: { x: 290, y: 540 }, isWarehouse: false },
-  { id: 'ottawa',      name: 'Ottawa',       province: 'ON', pos: { x: 360, y: 460 }, isWarehouse: true },
-  { id: 'gatineau',    name: 'Gatineau',     province: 'QC', pos: { x: 385, y: 445 }, isWarehouse: false },
-  { id: 'montreal',    name: 'Montréal',     province: 'QC', pos: { x: 480, y: 380 }, isWarehouse: true },
-  { id: 'laval',       name: 'Laval',        province: 'QC', pos: { x: 510, y: 360 }, isWarehouse: false },
-  { id: 'sherbrooke',  name: 'Sherbrooke',   province: 'QC', pos: { x: 530, y: 470 }, isWarehouse: false },
-  { id: 'troisrivieres', name: 'Trois-Rivières', province: 'QC', pos: { x: 620, y: 360 }, isWarehouse: false },
-  { id: 'quebec',      name: 'Québec',       province: 'QC', pos: { x: 720, y: 320 }, isWarehouse: true },
-  { id: 'levis',       name: 'Lévis',        province: 'QC', pos: { x: 740, y: 340 }, isWarehouse: false },
-  { id: 'saguenay',    name: 'Saguenay',     province: 'QC', pos: { x: 680, y: 180 }, isWarehouse: false },
-  { id: 'rimouski',    name: 'Rimouski',     province: 'QC', pos: { x: 820, y: 250 }, isWarehouse: false },
+export const TAX_LEVELS: Record<TaxLevel, { label: string; rate: number; happinessDelta: number }> = {
+  low: { label: 'Faible', rate: 0.03, happinessDelta: 4 },
+  medium: { label: 'Moyen', rate: 0.06, happinessDelta: 0 },
+  high: { label: 'Élevé', rate: 0.12, happinessDelta: -8 },
+};
+
+export const BUILDINGS: Record<BuildingType, BuildingDef> = {
+  empty: {
+    type: 'empty',
+    category: 'bulldoze',
+    label: 'Vide',
+    description: 'Terrain vide avec de l\'herbe canadienne.',
+    cost: 0,
+    income: 0,
+    maintenance: 0,
+    population: 0,
+    jobs: 0,
+    happiness: 0,
+    color: '#10b981',
+    roofColor: '#10b981',
+    minLevel: 1,
+    icon: '',
+  },
+  road: {
+    type: 'road',
+    category: 'road',
+    label: 'Route',
+    description: 'Connecte les zones et permet le développement.',
+    cost: 0,
+    income: 0,
+    maintenance: 0,
+    population: 0,
+    jobs: 0,
+    happiness: 0,
+    color: '#475569',
+    roofColor: '#334155',
+    minLevel: 1,
+    icon: '🛣️',
+  },
+  residential: {
+    type: 'residential',
+    category: 'residential',
+    label: 'Résidentiel',
+    description: 'Maison qui attire des habitants. Nécessite une route.',
+    cost: 2500,
+    income: 15,
+    maintenance: 2,
+    population: 8,
+    jobs: 0,
+    happiness: 1,
+    color: '#34d399',
+    roofColor: '#ef4444',
+    minLevel: 1,
+    icon: '🏠',
+  },
+  commercial: {
+    type: 'commercial',
+    category: 'commercial',
+    label: 'Commerce',
+    description: 'Magasin qui génère des revenus près des habitants.',
+    cost: 3500,
+    income: 45,
+    maintenance: 5,
+    population: 0,
+    jobs: 6,
+    happiness: 2,
+    color: '#60a5fa',
+    roofColor: '#f59e0b',
+    minLevel: 1,
+    icon: '🏪',
+  },
+  industrial: {
+    type: 'industrial',
+    category: 'industrial',
+    label: 'Industrie',
+    description: 'Usine qui crée des emplois et attire la population.',
+    cost: 4500,
+    income: 60,
+    maintenance: 8,
+    population: -2,
+    jobs: 12,
+    happiness: -3,
+    color: '#fbbf24',
+    roofColor: '#64748b',
+    minLevel: 1,
+    icon: '🏭',
+  },
+  police: {
+    type: 'police',
+    category: 'services',
+    label: 'Police',
+    description: 'Augmente la sécurité et le bonheur.',
+    cost: 8000,
+    income: 0,
+    maintenance: 35,
+    population: 0,
+    jobs: 4,
+    happiness: 8,
+    color: '#3b82f6',
+    roofColor: '#1d4ed8',
+    minLevel: 1,
+    icon: '🚔',
+  },
+  fire: {
+    type: 'fire',
+    category: 'services',
+    label: 'Pompiers',
+    description: 'Protège la ville des incendies.',
+    cost: 7500,
+    income: 0,
+    maintenance: 30,
+    population: 0,
+    jobs: 4,
+    happiness: 6,
+    color: '#f97316',
+    roofColor: '#ea580c',
+    minLevel: 1,
+    icon: '🚒',
+  },
+  hospital: {
+    type: 'hospital',
+    category: 'services',
+    label: 'Hôpital',
+    description: 'Soigne les habitants et augmente le bonheur.',
+    cost: 12000,
+    income: 0,
+    maintenance: 55,
+    population: 0,
+    jobs: 10,
+    happiness: 12,
+    color: '#f43f5e',
+    roofColor: '#e11d48',
+    minLevel: 1,
+    icon: '🏥',
+  },
+  park: {
+    type: 'park',
+    category: 'services',
+    label: 'Parc',
+    description: 'Espace vert qui rend les habitants heureux.',
+    cost: 1500,
+    income: 2,
+    maintenance: 2,
+    population: 0,
+    jobs: 1,
+    happiness: 10,
+    color: '#22c55e',
+    roofColor: '#16a34a',
+    minLevel: 1,
+    icon: '🌲',
+  },
+};
+
+export const CATEGORY_ORDER: { id: string; category: import('./types').ToolbarCategory; label: string; icon: string; accent: string }[] = [
+  { id: 'road', category: 'road', label: 'Route', icon: '🛣️', accent: '#94a3b8' },
+  { id: 'residential', category: 'residential', label: 'Maison', icon: '🏠', accent: '#34d399' },
+  { id: 'commercial', category: 'commercial', label: 'Commerce', icon: '🏪', accent: '#60a5fa' },
+  { id: 'industrial', category: 'industrial', label: 'Industrie', icon: '🏭', accent: '#fbbf24' },
+  { id: 'services', category: 'services', label: 'Services', icon: '🏛️', accent: '#a78bfa' },
+  { id: 'bulldoze', category: 'bulldoze', label: 'Détruire', icon: '💥', accent: '#ef4444' },
 ];
 
-export const STORE_CHAINS: StoreChain[] = [
-  { id: 'superc',   name: 'Super C',    color: '#e63946', cities: ['montreal','laval','sherbrooke','troisrivieres','quebec','levis','saguenay'] },
-  { id: 'iga',      name: 'IGA',        color: '#f4a261', cities: ['montreal','laval','sherbrooke','troisrivieres','quebec','levis','rimouski','saguenay','gatineau'] },
-  { id: 'maxi',     name: 'Maxi',       color: '#2a9d8f', cities: ['montreal','laval','troisrivieres','quebec','levis','saguenay'] },
-  { id: 'metro',    name: 'Métro',      color: '#e9c46a', cities: ['montreal','laval','sherbrooke','troisrivieres','quebec','levis','rimouski'] },
-  { id: 'provigo',  name: 'Provigo',    color: '#457b9d', cities: ['montreal','laval','quebec','levis','saguenay','rimouski'] },
-  { id: 'walmart',  name: 'Walmart',    color: '#0077b6', cities: ['montreal','laval','sherbrooke','quebec','levis','saguenay','gatineau','ottawa'] },
-  { id: 'costco',   name: 'Costco',     color: '#a8dadc', cities: ['montreal','laval','quebec','levis','ottawa'] },
-];
-
-// Generate stores from chains
-function generateStores(): Store[] {
-  const stores: Store[] = [];
-  let idx = 0;
-  for (const chain of STORE_CHAINS) {
-    for (const cityId of chain.cities) {
-      const city = CITIES.find(c => c.id === cityId);
-      if (!city) continue;
-      // Spread stores slightly around the city center
-      const angle = (idx * 137.5) * Math.PI / 180;
-      const radius = 25 + (idx % 3) * 15;
-      const pos: Point = {
-        x: city.pos.x + Math.cos(angle) * radius,
-        y: city.pos.y + Math.sin(angle) * radius,
-      };
-      stores.push({
-        id: `store-${idx}`,
-        chainId: chain.id,
-        chainName: chain.name,
-        cityId: city.id,
-        cityName: city.name,
-        pos,
-        demand: 30 + Math.floor(Math.random() * 50),
-        contractLevel: 0,
-        lastDelivery: 0,
-      });
-      idx++;
-    }
-  }
-  return stores;
-}
-
-export const STORES: Store[] = generateStores();
-
-// Staff names
-export const STAFF_NAMES = [
-  'Marie Tremblay', 'Jean Gagnon', 'Sophie Martin', 'Pierre Bélanger',
-  'Isabelle Côté', 'Michel Roy', 'Nathalie Bouchard', 'Daniel Lavoie',
-  'Julie Pelletier', 'Marc Fortin', 'Caroline Gauthier', 'Steve Boucher',
-  'Véronique Morin', 'Patrick Dubois', 'Annie Lévesque', 'François Côté',
-  'Mélissa Bergeron', 'Maxime Beaulieu', 'Karine Cloutier', 'Sébastien Proulx',
-];
-
-export function generateStaffName(): string {
-  return STAFF_NAMES[Math.floor(Math.random() * STAFF_NAMES.length)];
-}
+export const SERVICE_BUILDINGS: BuildingType[] = ['police', 'fire', 'hospital', 'park'];
+export const ZONE_BUILDINGS: BuildingType[] = ['residential', 'commercial', 'industrial'];

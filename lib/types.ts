@@ -1,108 +1,90 @@
-// Quebec Logistics Tycoon - Game Types
+// Canada City Builder - Game Types
 
-export type Point = { x: number; y: number };
+export type TaxLevel = 'low' | 'medium' | 'high';
 
-export type City = {
-  id: string;
-  name: string;
-  province: 'ON' | 'QC';
-  pos: Point; // canvas coordinates (normalized 0-1000)
-  isWarehouse: boolean;
+export type BuildingType =
+  | 'empty'
+  | 'road'
+  | 'residential'
+  | 'commercial'
+  | 'industrial'
+  | 'police'
+  | 'fire'
+  | 'hospital'
+  | 'park';
+
+export type ToolbarCategory = 'road' | 'residential' | 'commercial' | 'industrial' | 'services' | 'bulldoze';
+
+export type Tile = {
+  x: number;
+  y: number;
+  type: BuildingType;
+  level: number; // 1-3
+  variant: number; // visual variety
+  roads: {
+    top: boolean;
+    right: boolean;
+    bottom: boolean;
+    left: boolean;
+  };
+  // cache for rendering: distance to nearest road / population / jobs
+  roadDistance: number;
+  population: number;
+  jobs: number;
 };
 
-export type StoreChain = {
-  id: string;
-  name: string;
+export type BuildingDef = {
+  type: BuildingType;
+  category: ToolbarCategory;
+  label: string;
+  description: string;
+  cost: number;
+  income: number; // per tick
+  maintenance: number; // per tick
+  population: number;
+  jobs: number;
+  happiness: number;
   color: string;
-  cities: string[]; // city ids where they have stores
+  roofColor: string;
+  minLevel: number;
+  icon: string;
 };
 
-export type Store = {
-  id: string;
-  chainId: string;
-  chainName: string;
-  cityId: string;
-  cityName: string;
-  pos: Point;
-  demand: number; // 0-100, how much they need restocking
-  contractLevel: 0 | 1 | 2 | 3; // 0=none, 1=basic, 2=preferred, 3=exclusive
-  lastDelivery: number; // timestamp
-};
-
-export type Cargo = {
-  id: string;
-  type: string;
-  quantity: number;
-  destinationStoreId: string;
-  sourceWarehouseId: string;
-};
-
-export type Truck = {
-  id: string;
-  name: string;
-  pos: Point;
-  route: Point[]; // waypoints to destination
-  routeIndex: number;
-  speed: number; // units per tick
-  cargo: Cargo | null;
-  status: 'idle' | 'loading' | 'en_route' | 'unloading' | 'returning';
-  destinationStoreId: string | null;
-  destinationWarehouseId: string | null;
-  homeWarehouseId: string;
-  capacity: number;
-  condition: number; // 0-100
-  fuel: number; // 0-100
-  assignedByAI: boolean;
-  totalDeliveries: number;
-  totalEarnings: number;
-};
-
-export type Warehouse = {
-  id: string;
-  cityId: string;
-  cityName: string;
-  pos: Point;
-  level: number;
-  capacity: number;
-  stock: number;
-  staff: Staff[];
-  trucks: Truck[];
-};
-
-export type Staff = {
-  id: string;
-  name: string;
-  role: 'secretary' | 'dispatcher' | 'loader' | 'manager';
-  salary: number;
-  efficiency: number; // 1-10
-  hiredAt: number;
-};
-
-export type Contract = {
-  id: string;
-  storeId: string;
-  storeName: string;
-  chainName: string;
-  level: 0 | 1 | 2 | 3;
-  paymentPerDelivery: number;
-  minDeliveriesPerWeek: number;
-  active: boolean;
-};
-
-export type GameState = {
+export type GameStats = {
   money: number;
-  day: number;
+  population: number;
+  happiness: number; // 0-100
+  taxLevel: TaxLevel;
   tick: number;
-  warehouses: Warehouse[];
-  trucks: Truck[];
-  stores: Store[];
-  contracts: Contract[];
-  cities: City[];
-  staff: Staff[];
-  playerName: string;
   totalEarned: number;
   totalSpent: number;
-  totalDeliveries: number;
-  reputation: number;
-  lastSave: number;
+  roadsBuilt: number;
+  buildingsBuilt: number;
 };
+
+export type CityState = {
+  playerId: string;
+  playerName: string;
+  gridSize: number;
+  tiles: Tile[][];
+  stats: GameStats;
+  selectedCategory: ToolbarCategory;
+  selectedBuilding: BuildingType;
+  toasts: ToastEvent[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ToastEvent = {
+  id: string;
+  message: string;
+  type: 'success' | 'warning' | 'info';
+};
+
+export type IsoView = {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+};
+
+export type Point = { x: number; y: number };

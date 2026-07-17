@@ -16,67 +16,51 @@ export function generateId(prefix: string): string {
 // --- Initial State ---
 export function createInitialState(playerName: string = 'Player'): GameState {
   const toronto = CITIES.find(c => c.id === 'toronto')!;
-  const ottawa = CITIES.find(c => c.id === 'ottawa')!;
-  const montreal = CITIES.find(c => c.id === 'montreal')!;
-  const quebec = CITIES.find(c => c.id === 'quebec')!;
 
-  const warehouseCities = [toronto, ottawa, montreal, quebec];
-
-  const warehouses: Warehouse[] = warehouseCities.map((city, i) => ({
-    id: `wh-${i}`,
-    cityId: city.id,
-    cityName: city.name,
-    pos: { ...city.pos },
-    level: i === 0 ? 2 : 1, // Toronto starts at level 2
-    capacity: i === 0 ? 500 : 300,
-    stock: i === 0 ? 200 : 100,
-    staff: i === 0 ? [{
-      id: generateId('staff'),
-      name: 'Marie Tremblay',
-      role: 'manager',
-      salary: 800,
-      efficiency: 7,
-      hiredAt: 0,
-    }] : [],
+  const warehouse: Warehouse = {
+    id: 'wh-0',
+    cityId: toronto.id,
+    cityName: toronto.name,
+    pos: { ...toronto.pos },
+    level: 1,
+    capacity: 200,
+    stock: 50,
+    staff: [],
     trucks: [],
-  }));
+  };
 
-  // Starting trucks (2 in Toronto)
-  const trucks: Truck[] = [];
-  for (let i = 0; i < 2; i++) {
-    const truck: Truck = {
-      id: generateId('truck'),
-      name: `Camion ${i + 1}`,
-      pos: { ...toronto.pos },
-      route: [],
-      routeIndex: 0,
-      speed: 2.5,
-      cargo: null,
-      status: 'idle',
-      destinationStoreId: null,
-      destinationWarehouseId: null,
-      homeWarehouseId: 'wh-0',
-      capacity: 50,
-      condition: 100,
-      fuel: 100,
-      assignedByAI: false,
-      totalDeliveries: 0,
-      totalEarnings: 0,
-    };
-    trucks.push(truck);
-    warehouses[0].trucks.push(truck);
-  }
+  const truck: Truck = {
+    id: generateId('truck'),
+    name: 'Camion 1',
+    pos: { ...toronto.pos },
+    route: [],
+    routeIndex: 0,
+    speed: 2.5,
+    cargo: null,
+    status: 'idle',
+    destinationStoreId: null,
+    destinationWarehouseId: null,
+    homeWarehouseId: 'wh-0',
+    capacity: 50,
+    condition: 100,
+    fuel: 100,
+    assignedByAI: false,
+    totalDeliveries: 0,
+    totalEarnings: 0,
+  };
+
+  warehouse.trucks.push(truck);
 
   return {
-    money: 50000,
+    money: 5000,
     day: 1,
     tick: 0,
-    warehouses,
-    trucks,
+    warehouses: [warehouse],
+    trucks: [truck],
     stores: STORES.map(s => ({ ...s })),
     contracts: [],
     cities: CITIES,
-    staff: warehouses[0].staff,
+    staff: [],
     playerName,
     totalEarned: 0,
     totalSpent: 0,
@@ -214,7 +198,7 @@ export function gameTick(state: GameState): GameState {
         if (truck.cargo && truck.destinationStoreId) {
           const store = newState.stores.find(s => s.id === truck.destinationStoreId);
           if (store) {
-            const deliveryPayment = truck.cargo.quantity * 15 * (1 + store.contractLevel * 0.3);
+            const deliveryPayment = truck.cargo.quantity * 25 * (1 + store.contractLevel * 0.3);
             newState.money += deliveryPayment;
             newState.totalEarned += deliveryPayment;
             newState.totalDeliveries++;
@@ -306,7 +290,7 @@ export function negotiateContract(state: GameState, storeId: string, level: 1 | 
   const store = state.stores.find(s => s.id === storeId);
   if (!store) return false;
 
-  const costs = [0, 1000, 5000, 15000];
+  const costs = [0, 500, 2000, 8000];
   const cost = costs[level];
   if (state.money < cost) return false;
 
@@ -325,7 +309,7 @@ export function negotiateContract(state: GameState, storeId: string, level: 1 | 
     storeName: store.chainName + ' ' + store.cityName,
     chainName: store.chainName,
     level,
-    paymentPerDelivery: 15 * (1 + level * 0.3),
+    paymentPerDelivery: 25 * (1 + level * 0.3),
     minDeliveriesPerWeek: level * 3,
     active: true,
   };
@@ -337,7 +321,7 @@ export function negotiateContract(state: GameState, storeId: string, level: 1 | 
 
 // --- Buy Truck ---
 export function buyTruck(state: GameState, warehouseId: string): boolean {
-  const cost = 25000;
+  const cost = 8000;
   if (state.money < cost) return false;
 
   const wh = state.warehouses.find(w => w.id === warehouseId);
@@ -376,14 +360,14 @@ export function upgradeWarehouse(state: GameState, warehouseId: string): boolean
   const wh = state.warehouses.find(w => w.id === warehouseId);
   if (!wh) return false;
 
-  const cost = wh.level * 20000;
+  const cost = wh.level * 5000;
   if (state.money < cost) return false;
   if (wh.level >= 5) return false;
 
   state.money -= cost;
   state.totalSpent += cost;
   wh.level++;
-  wh.capacity = wh.level * 300;
+  wh.capacity = wh.level * 200;
   return true;
 }
 
@@ -393,12 +377,20 @@ export function hireStaff(state: GameState, warehouseId: string, role: Staff['ro
   if (!wh) return false;
 
   const salaries: Record<Staff['role'], number> = {
-    secretary: 400,
-    dispatcher: 600,
-    loader: 350,
-    manager: 800,
+    secretary: 200,
+    dispatcher: 300,
+    loader: 175,
+    manager: 400,
   };
-  const cost = salaries[role] * 2; // hiring fee
+
+  const hiringCosts: Record<Staff['role'], number> = {
+    secretary: 350,
+    dispatcher: 500,
+    loader: 300,
+    manager: 600,
+  };
+
+  const cost = hiringCosts[role];
   if (state.money < cost) return false;
 
   state.money -= cost;
